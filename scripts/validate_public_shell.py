@@ -5,6 +5,8 @@ import json
 import shutil
 import subprocess
 from collections import Counter
+from datetime import datetime
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
@@ -22,10 +24,13 @@ EXPECTED_REPO_FILES = {
     "fixtures/schema_examples/courts_index_v1.example.json",
     "fixtures/schema_examples/eval_manifest_v1.example.json",
     "fixtures/schema_examples/narrative_v0.example.json",
+    "fixtures/slice_freeze/runs/2026-01-10/tick_observation.jsonl",
+    "fixtures/slice_freeze/runs/event_spine.jsonl",
     "schemas/courts_index_v1.schema.json",
     "schemas/eval_manifest_v1.schema.json",
     "schemas/narrative_v0.schema.json",
     "scripts/repair_jsonl_escaped_newlines_v1.py",
+    "scripts/slice_freeze.py",
     "scripts/validate_public_shell.py",
 }
 EXPORTED_PUBLIC_FILES = {
@@ -80,6 +85,14 @@ def _require_keys(payload: dict, keys: list[str], label: str) -> None:
 
 def _is_hex_64(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= HEX_64
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run_python(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -217,6 +230,73 @@ def _validate_jsonl_repair_utility() -> int:
     return 3
 
 
+def _validate_slice_freeze_utility() -> int:
+    fixture_root = ROOT / "fixtures" / "slice_freeze" / "runs"
+    script_rel = "scripts/slice_freeze.py"
+    time_suffix = "20260110T000000_20260110T060000"
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-slice-freeze-") as temp_dir:
+        temp_root = Path(temp_dir)
+        runs_root = temp_root / "runs"
+        shutil.copytree(fixture_root, runs_root)
+
+        success_run = _run_python(
+            [script_rel, "--runs-dir", str(runs_root), "--date", "2026-01-10", "--hours", "6"],
+            cwd=ROOT,
+        )
+        _require(success_run.returncode == 0, f"slice freeze success run failed: {success_run.stderr.strip()}")
+        _require("Slice frozen successfully." in success_run.stdout, "slice freeze success output missing completion line")
+
+        frozen_dir = runs_root / "frozen" / "2026-01-10"
+        ticks_out = frozen_dir / f"ticks_{time_suffix}.jsonl"
+        spine_out = frozen_dir / f"spine_{time_suffix}.jsonl"
+        manifest_path = frozen_dir / "manifest.json"
+
+        _require(ticks_out.is_file(), "slice freeze did not write filtered ticks output")
+        _require(spine_out.is_file(), "slice freeze did not write filtered spine output")
+        _require(manifest_path.is_file(), "slice freeze did not write manifest.json")
+
+        tick_rows = [json.loads(line) for line in ticks_out.read_text(encoding="utf-8").splitlines() if line.strip()]
+        _require(len(tick_rows) == 2, "slice freeze ticks output count mismatch")
+        _require([row["timestamp"] for row in tick_rows] == ["2026-01-10T00:05:00Z", "2026-01-10T03:15:00Z"], "slice freeze ticks output timestamps mismatch")
+
+        spine_rows = [json.loads(line) for line in spine_out.read_text(encoding="utf-8").splitlines() if line.strip()]
+        _require(len(spine_rows) == 2, "slice freeze spine output count mismatch")
+        _require([row["timestamp"] for row in spine_rows] == ["2026-01-10T00:10:00Z", "2026-01-10T05:59:00Z"], "slice freeze spine output timestamps mismatch")
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        _require_keys(manifest, ["frozen_at", "date", "start_time", "end_time", "ticks", "spine"], "slice freeze manifest")
+        datetime.fromisoformat(manifest["frozen_at"])
+        _require(manifest["date"] == "2026-01-10", "slice freeze manifest date mismatch")
+        _require(manifest["start_time"] == "2026-01-10T00:00:00+00:00", "slice freeze manifest start_time mismatch")
+        _require(manifest["end_time"] == "2026-01-10T06:00:00+00:00", "slice freeze manifest end_time mismatch")
+        _require(manifest["ticks"]["path"] == f"ticks_{time_suffix}.jsonl", "slice freeze manifest tick path mismatch")
+        _require(manifest["ticks"]["count"] == 2, "slice freeze manifest tick count mismatch")
+        _require(manifest["ticks"]["sha256"] == _sha256_file(ticks_out), "slice freeze manifest tick hash mismatch")
+        _require(manifest["spine"]["path"] == f"spine_{time_suffix}.jsonl", "slice freeze manifest spine path mismatch")
+        _require(manifest["spine"]["count"] == 2, "slice freeze manifest spine count mismatch")
+        _require(manifest["spine"]["sha256"] == _sha256_file(spine_out), "slice freeze manifest spine hash mismatch")
+
+        missing_spine_root = temp_root / "runs-missing-spine"
+        shutil.copytree(fixture_root, missing_spine_root)
+        (missing_spine_root / "event_spine.jsonl").unlink()
+        missing_spine = _run_python(
+            [script_rel, "--runs-dir", str(missing_spine_root), "--date", "2026-01-10", "--hours", "6"],
+            cwd=ROOT,
+        )
+        _require(missing_spine.returncode == 1, f"slice freeze missing spine returncode mismatch: {missing_spine.returncode}")
+        _require("spine not found" in missing_spine.stderr, "slice freeze missing spine error mismatch")
+
+        invalid_date = _run_python(
+            [script_rel, "--runs-dir", str(runs_root), "--date", "2026-99-99", "--hours", "6"],
+            cwd=ROOT,
+        )
+        _require(invalid_date.returncode == 1, f"slice freeze invalid date returncode mismatch: {invalid_date.returncode}")
+        _require("invalid date format" in invalid_date.stderr, "slice freeze invalid date error mismatch")
+
+    return 3
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -272,6 +352,7 @@ def main() -> int:
 
     fixture_count = _validate_example_fixtures()
     jsonl_repair_checks = _validate_jsonl_repair_utility()
+    slice_freeze_checks = _validate_slice_freeze_utility()
 
     print(
         "validated_public_shell="
@@ -279,6 +360,7 @@ def main() -> int:
         f"schemas:{len(schema_payloads)} "
         f"schema_examples:{fixture_count} "
         f"jsonl_repair_checks:{jsonl_repair_checks} "
+        f"slice_freeze_checks:{slice_freeze_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )

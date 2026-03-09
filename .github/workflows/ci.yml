@@ -21,6 +21,5 @@ jobs:
 
       - run: python --version
 
-      - name: Validate public shell contracts, examples, and utilities
+      - name: Validate public shell contracts, fixtures, and utilities
         run: python scripts/validate_public_shell.py
-          PY
