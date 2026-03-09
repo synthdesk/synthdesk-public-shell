@@ -31,6 +31,7 @@ EXPECTED_REPO_FILES = {
     "schemas/narrative_v0.schema.json",
     "scripts/clock_skew_check.py",
     "scripts/repair_jsonl_escaped_newlines_v1.py",
+    "scripts/retention_watermark.py",
     "scripts/slice_freeze.py",
     "scripts/validate_public_shell.py",
 }
@@ -348,6 +349,140 @@ def _validate_clock_skew_utility() -> int:
     return 3
 
 
+def _validate_retention_watermark_utility() -> int:
+    script_rel = "scripts/retention_watermark.py"
+    today = datetime.now().astimezone().astimezone().strftime("%Y-%m-%d")
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-retention-watermark-") as temp_dir:
+        temp_root = Path(temp_dir)
+
+        ticks_root = temp_root / "runs"
+        day_dir = ticks_root / "2026-01-10"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        tick_path = day_dir / "tick_observation.jsonl"
+        tick_path.write_text(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-01-10T00:05:00Z","symbol":"BTCUSDT","price":42000.5}',
+                    '{"timestamp":"2026-01-10T03:15:00Z","symbol":"BTCUSDT","price":42110.0}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        spine_path = ticks_root / "event_spine.jsonl"
+        spine_path.write_text(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-01-10T00:10:00Z","event_type":"market.tick_observed"}',
+                    '{"timestamp":"2026-01-10T05:59:00Z","event_type":"market.regime"}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        soak_root = temp_root / "soak"
+        soak_root.mkdir(parents=True, exist_ok=True)
+        soak_path = soak_root / "artifact.jsonl"
+        soak_path.write_text('{"ts_utc":"2026-01-10T01:00:00Z","status":"ok"}\n', encoding="utf-8")
+
+        output_dir = temp_root / "out"
+        success_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(spine_path),
+                "--ticks-root",
+                str(ticks_root),
+                "--soak-root",
+                str(soak_root),
+                "--output-dir",
+                str(output_dir),
+            ],
+            cwd=ROOT,
+        )
+        _require(success_run.returncode == 0, f"retention watermark success run failed: {success_run.stderr.strip()}")
+        watermark_path = output_dir / f"retention_watermark_{today}.json"
+        _require(watermark_path.is_file(), "retention watermark did not create daily watermark file")
+        watermark = json.loads(watermark_path.read_text(encoding="utf-8"))
+        _require_keys(watermark, ["date", "generated_at", "datasets"], "retention watermark payload")
+        _require(watermark["date"] == today, "retention watermark date mismatch")
+        datetime.fromisoformat(watermark["generated_at"])
+        datasets = {item["dataset_id"]: item for item in watermark["datasets"]}
+        _require(set(datasets) == {"spine", "ticks", "soak_artifacts"}, "retention watermark dataset ids mismatch")
+        _require(datasets["ticks"]["min_ts"] == "2026-01-10T00:05:00+00:00", "retention watermark tick min mismatch")
+        _require(datasets["ticks"]["max_ts"] == "2026-01-10T03:15:00+00:00", "retention watermark tick max mismatch")
+        _require(datasets["ticks"]["file_count"] == 1, "retention watermark tick file_count mismatch")
+        _require(datasets["spine"]["max_ts"] == "2026-01-10T05:59:00+00:00", "retention watermark spine max mismatch")
+        _require(datasets["soak_artifacts"]["file_count"] == 1, "retention watermark soak file_count mismatch")
+
+        repeat_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(spine_path),
+                "--ticks-root",
+                str(ticks_root),
+                "--soak-root",
+                str(soak_root),
+                "--output-dir",
+                str(output_dir),
+            ],
+            cwd=ROOT,
+        )
+        _require(repeat_run.returncode == 0, f"retention watermark repeat run failed: {repeat_run.stderr.strip()}")
+        _require(f"exists: {watermark_path}" in repeat_run.stderr.strip(), "retention watermark repeat exists message mismatch")
+
+        regression_output = temp_root / "regression-out"
+        regression_output.mkdir(parents=True, exist_ok=True)
+        prior_path = regression_output / "retention_watermark_2000-01-01.json"
+        prior_payload = {
+            "date": "2000-01-01",
+            "generated_at": "2000-01-01T00:00:00+00:00",
+            "datasets": [
+                {
+                    "dataset_id": "ticks",
+                    "path": "ticks",
+                    "min_ts": "2026-01-10T00:05:00+00:00",
+                    "max_ts": "2026-01-10T23:59:00+00:00",
+                    "file_count": 1,
+                    "byte_count": 1,
+                }
+            ],
+        }
+        prior_path.write_text(json.dumps(prior_payload, indent=2) + "\n", encoding="utf-8")
+
+        regression_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(spine_path),
+                "--ticks-root",
+                str(ticks_root),
+                "--soak-root",
+                str(soak_root),
+                "--output-dir",
+                str(regression_output),
+            ],
+            cwd=ROOT,
+        )
+        _require(regression_run.returncode == 0, f"retention watermark regression run failed: {regression_run.stderr.strip()}")
+        warning_path = regression_output / f"retention_watermark_warning_{today}.json"
+        _require(warning_path.is_file(), "retention watermark regression run did not create warning file")
+        warning = json.loads(warning_path.read_text(encoding="utf-8"))
+        _require_keys(warning, ["date", "generated_at", "regressions"], "retention watermark warning")
+        _require(warning["date"] == today, "retention watermark warning date mismatch")
+        datetime.fromisoformat(warning["generated_at"])
+        _require(isinstance(warning["regressions"], list) and len(warning["regressions"]) == 1, "retention watermark warning regression count mismatch")
+        regression = warning["regressions"][0]
+        _require(regression["dataset_id"] == "ticks", "retention watermark regression dataset_id mismatch")
+        _require(regression["prev_watermark"] == "retention_watermark_2000-01-01.json", "retention watermark regression prior watermark mismatch")
+
+    return 3
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -405,6 +540,7 @@ def main() -> int:
     jsonl_repair_checks = _validate_jsonl_repair_utility()
     slice_freeze_checks = _validate_slice_freeze_utility()
     clock_skew_checks = _validate_clock_skew_utility()
+    retention_watermark_checks = _validate_retention_watermark_utility()
 
     print(
         "validated_public_shell="
@@ -414,6 +550,7 @@ def main() -> int:
         f"jsonl_repair_checks:{jsonl_repair_checks} "
         f"slice_freeze_checks:{slice_freeze_checks} "
         f"clock_skew_checks:{clock_skew_checks} "
+        f"retention_watermark_checks:{retention_watermark_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )
