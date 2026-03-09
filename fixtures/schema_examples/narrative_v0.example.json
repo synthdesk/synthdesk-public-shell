@@ -1,0 +1,63 @@
+{
+  "generated_utc": "2026-03-09T00:00:00Z",
+  "model_calibration_start": "2026-02-01",
+  "model_calibration_end": "2026-03-01",
+  "bocpd_run_id": "run-demo-001",
+  "bocpd_window": "2026-03-01 -> 2026-03-09",
+  "data_lag_hours": 1.5,
+  "assets": {
+    "BTCUSDT": {
+      "current_regime": {
+        "state": "MID",
+        "state_idx": 1,
+        "confidence": 0.72,
+        "confidence_window_avg": 0.68,
+        "log_rv": 1.2,
+        "vol_of_vol": 0.3,
+        "emission_mean": [
+          1.0,
+          0.2
+        ],
+        "emission_distance_sigma": [
+          0.1,
+          -0.2
+        ],
+        "window_obs": 96,
+        "last_ts": "2026-03-09T00:00:00Z"
+      },
+      "dwell": {
+        "current_dwell_obs": 8,
+        "expected_dwell_obs": 12.0,
+        "dwell_percentile": 0.55,
+        "interpretation": "normal"
+      },
+      "residual_health": {
+        "mean_d2": 2.1,
+        "chi2_ref_mean": 2.0,
+        "d2_ratio": 1.05,
+        "tail_5pct": 0.06,
+        "expected_5pct": 0.05,
+        "tail_inflation": 1.2,
+        "interpretation": "well-fit"
+      },
+      "bocpd_status": {
+        "verdict": "FRESH",
+        "n_cp_episodes": 1,
+        "max_mass_short": 0.12,
+        "last_reset_ts": "2026-03-08T18:00:00Z",
+        "interpretation": "none"
+      },
+      "expected_exits": [
+        {
+          "to_state": "HIGH",
+          "to_label": "vol-up",
+          "to_state_idx": 2,
+          "probability": 0.24,
+          "delta_log_rv": 0.3,
+          "delta_vov": 0.1,
+          "signature": "mid-to-high"
+        }
+      ]
+    }
+  }
+}

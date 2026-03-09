@@ -12,6 +12,9 @@ EXPECTED_REPO_FILES = {
     "docs/public_shell_export_v1.md",
     "export_audit_report.json",
     "export_audit_report.md",
+    "fixtures/schema_examples/courts_index_v1.example.json",
+    "fixtures/schema_examples/eval_manifest_v1.example.json",
+    "fixtures/schema_examples/narrative_v0.example.json",
     "schemas/courts_index_v1.schema.json",
     "schemas/eval_manifest_v1.schema.json",
     "schemas/narrative_v0.schema.json",
@@ -42,6 +45,7 @@ DOC_REQUIRED_PHRASES = [
     "Exit Codes",
     "Manual Mirror-Ready Flow",
 ]
+HEX_64 = set("0123456789abcdef")
 
 
 def _repo_files(root: Path) -> set[str]:
@@ -59,6 +63,101 @@ def _repo_files(root: Path) -> set[str]:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def _require_keys(payload: dict, keys: list[str], label: str) -> None:
+    missing = [key for key in keys if key not in payload]
+    _require(not missing, f"{label} is missing keys: {missing}")
+
+
+def _is_hex_64(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= HEX_64
+
+
+def _validate_example_fixtures() -> int:
+    fixture_root = ROOT / "fixtures" / "schema_examples"
+
+    courts_index = json.loads((fixture_root / "courts_index_v1.example.json").read_text(encoding="utf-8"))
+    _require(isinstance(courts_index, dict), "courts_index example must parse as a JSON object")
+    _require_keys(courts_index, ["entries"], "courts_index example")
+    _require(isinstance(courts_index["entries"], list) and len(courts_index["entries"]) == 1, "courts_index example must contain one entry")
+    _require(isinstance(courts_index.get("generated_utc"), str), "courts_index example generated_utc must be a string")
+
+    eval_manifest = json.loads((fixture_root / "eval_manifest_v1.example.json").read_text(encoding="utf-8"))
+    _require(isinstance(eval_manifest, dict), "eval_manifest example must parse as a JSON object")
+    _require_keys(
+        eval_manifest,
+        ["version", "court", "hypothesis_id", "window", "eval_tuple", "eval_id", "inputs"],
+        "eval_manifest example",
+    )
+    _require(_is_hex_64(eval_manifest["eval_id"]), "eval_manifest example eval_id must be a 64-char lowercase hex string")
+    _require_keys(eval_manifest["window_bounds"], ["start_ts_utc", "end_ts_utc"], "eval_manifest example window_bounds")
+    _require_keys(
+        eval_manifest["eval_tuple"],
+        ["spine_hash", "feature_version", "regime_model_version", "horizon_spec"],
+        "eval_manifest example eval_tuple",
+    )
+    _require(_is_hex_64(eval_manifest["eval_tuple"]["spine_hash"]), "eval_manifest example spine_hash must be 64-char lowercase hex")
+    horizon_spec = eval_manifest["eval_tuple"]["horizon_spec"]
+    _require_keys(horizon_spec, ["horizon_minutes"], "eval_manifest example horizon_spec")
+    _require(isinstance(horizon_spec["horizon_minutes"], int) and horizon_spec["horizon_minutes"] >= 1, "eval_manifest example horizon_minutes must be >= 1")
+    inputs = eval_manifest["inputs"]
+    _require_keys(inputs, ["spine_snapshot", "spine_sha256", "spine_bytes", "tick_hashes"], "eval_manifest example inputs")
+    _require(_is_hex_64(inputs["spine_sha256"]), "eval_manifest example spine_sha256 must be 64-char lowercase hex")
+    _require(isinstance(inputs["spine_bytes"], int) and inputs["spine_bytes"] >= 1, "eval_manifest example spine_bytes must be >= 1")
+    _require(isinstance(inputs["tick_hashes"], list) and len(inputs["tick_hashes"]) >= 1, "eval_manifest example tick_hashes must be non-empty")
+    tick_hash = inputs["tick_hashes"][0]
+    _require_keys(tick_hash, ["path", "sha256"], "eval_manifest example tick_hashes[0]")
+    _require(_is_hex_64(tick_hash["sha256"]), "eval_manifest example tick hash must be 64-char lowercase hex")
+
+    narrative = json.loads((fixture_root / "narrative_v0.example.json").read_text(encoding="utf-8"))
+    _require(isinstance(narrative, dict), "narrative example must parse as a JSON object")
+    _require_keys(
+        narrative,
+        ["generated_utc", "model_calibration_start", "model_calibration_end", "bocpd_run_id", "bocpd_window", "data_lag_hours", "assets"],
+        "narrative example",
+    )
+    _require(isinstance(narrative["assets"], dict) and "BTCUSDT" in narrative["assets"], "narrative example must contain BTCUSDT asset")
+    asset = narrative["assets"]["BTCUSDT"]
+    _require_keys(asset, ["current_regime", "dwell", "residual_health", "bocpd_status", "expected_exits"], "narrative example asset")
+    current_regime = asset["current_regime"]
+    _require_keys(
+        current_regime,
+        ["state", "state_idx", "confidence", "confidence_window_avg", "log_rv", "vol_of_vol", "emission_mean", "emission_distance_sigma", "window_obs", "last_ts"],
+        "narrative example current_regime",
+    )
+    _require(current_regime["state"] in {"LOW", "MID", "HIGH"}, "narrative example current_regime.state invalid")
+    _require(isinstance(current_regime["emission_mean"], list) and len(current_regime["emission_mean"]) == 2, "narrative example emission_mean must have length 2")
+    _require(isinstance(current_regime["emission_distance_sigma"], list) and len(current_regime["emission_distance_sigma"]) == 2, "narrative example emission_distance_sigma must have length 2")
+
+    dwell = asset["dwell"]
+    _require_keys(dwell, ["current_dwell_obs", "expected_dwell_obs", "dwell_percentile", "interpretation"], "narrative example dwell")
+    _require(dwell["interpretation"] in {"early", "normal", "extended"}, "narrative example dwell.interpretation invalid")
+
+    residual = asset["residual_health"]
+    _require_keys(
+        residual,
+        ["mean_d2", "chi2_ref_mean", "d2_ratio", "tail_5pct", "expected_5pct", "tail_inflation", "interpretation"],
+        "narrative example residual_health",
+    )
+    _require(residual["interpretation"] in {"well-fit", "stressed", "under-predicting"}, "narrative example residual_health.interpretation invalid")
+
+    bocpd = asset["bocpd_status"]
+    _require_keys(bocpd, ["verdict", "n_cp_episodes", "max_mass_short", "last_reset_ts", "interpretation"], "narrative example bocpd_status")
+    _require(bocpd["verdict"] in {"FRESH", "BORDERLINE", "STALE", "UNKNOWN"}, "narrative example bocpd_status.verdict invalid")
+    _require(bocpd["interpretation"] in {"none", "stress", "break", "unknown"}, "narrative example bocpd_status.interpretation invalid")
+
+    exits = asset["expected_exits"]
+    _require(isinstance(exits, list) and len(exits) == 1, "narrative example expected_exits must contain one entry")
+    exit_entry = exits[0]
+    _require_keys(
+        exit_entry,
+        ["to_state", "to_label", "to_state_idx", "probability", "delta_log_rv", "delta_vov", "signature"],
+        "narrative example exit_entry",
+    )
+    _require(exit_entry["to_state"] in {"LOW", "MID", "HIGH"}, "narrative example exit_entry.to_state invalid")
+
+    return 3
 
 
 def main() -> int:
@@ -114,10 +213,13 @@ def main() -> int:
     _require(audit_md.strip() != "", f"{audit_md_path} is empty")
     _require("# Public Shell Export Audit" in audit_md, f"{audit_md_path} is missing expected title")
 
+    fixture_count = _validate_example_fixtures()
+
     print(
         "validated_public_shell="
         f"repo_files:{len(repo_files)} "
         f"schemas:{len(schema_payloads)} "
+        f"schema_examples:{fixture_count} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )

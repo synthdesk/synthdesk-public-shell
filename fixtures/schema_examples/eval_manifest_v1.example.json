@@ -1,0 +1,31 @@
+{
+  "version": "v1",
+  "court": "demo_court",
+  "hypothesis_id": "hypothesis-demo-001",
+  "window": "2026-03-01/2026-03-02",
+  "window_bounds": {
+    "start_ts_utc": "2026-03-01T00:00:00Z",
+    "end_ts_utc": "2026-03-02T00:00:00Z"
+  },
+  "eval_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "eval_tuple": {
+    "spine_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "feature_version": "feature_v1",
+    "regime_model_version": "regime_v1",
+    "horizon_spec": {
+      "horizon_minutes": 60,
+      "embargo_seconds": 0
+    }
+  },
+  "inputs": {
+    "spine_snapshot": "fixtures/spine_snapshot.jsonl",
+    "spine_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "spine_bytes": 123,
+    "tick_hashes": [
+      {
+        "path": "fixtures/ticks.jsonl",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  }
+}
