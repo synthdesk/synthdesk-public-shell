@@ -29,6 +29,7 @@ EXPECTED_REPO_FILES = {
     "schemas/courts_index_v1.schema.json",
     "schemas/eval_manifest_v1.schema.json",
     "schemas/narrative_v0.schema.json",
+    "scripts/clock_skew_check.py",
     "scripts/repair_jsonl_escaped_newlines_v1.py",
     "scripts/slice_freeze.py",
     "scripts/validate_public_shell.py",
@@ -297,6 +298,56 @@ def _validate_slice_freeze_utility() -> int:
     return 3
 
 
+def _validate_clock_skew_utility() -> int:
+    script_rel = "scripts/clock_skew_check.py"
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-clock-skew-") as temp_dir:
+        temp_root = Path(temp_dir)
+        day = "2026-01-10"
+
+        present_base = temp_root / "present-base"
+        present_base.mkdir(parents=True, exist_ok=True)
+        present_file = present_base / f"clock_skew_daily_{day}.json"
+        present_file.write_text('{"status":"ok"}\n', encoding="utf-8")
+        present_output = temp_root / "present-output"
+        present_run = _run_python(
+            [script_rel, "--base-dir", str(present_base), "--output-dir", str(present_output), "--date", day],
+            cwd=ROOT,
+        )
+        _require(present_run.returncode == 0, f"clock skew present run failed: {present_run.stderr.strip()}")
+        _require(not present_output.exists(), "clock skew present run should not create output dir")
+
+        missing_base = temp_root / "missing-base"
+        missing_base.mkdir(parents=True, exist_ok=True)
+        missing_output = temp_root / "missing-output"
+        missing_run = _run_python(
+            [script_rel, "--base-dir", str(missing_base), "--output-dir", str(missing_output), "--date", day],
+            cwd=ROOT,
+        )
+        _require(missing_run.returncode == 0, f"clock skew missing run failed: {missing_run.stderr.strip()}")
+        warn_path = missing_output / f"clock_skew_warning_{day}.json"
+        _require(warn_path.is_file(), "clock skew missing run did not create warning artifact")
+        warning = json.loads(warn_path.read_text(encoding="utf-8"))
+        _require_keys(warning, ["date", "generated_at", "missing", "reason"], "clock skew warning")
+        _require(warning["date"] == day, "clock skew warning date mismatch")
+        datetime.fromisoformat(warning["generated_at"])
+        _require(warning["missing"] == str(missing_base / f"clock_skew_daily_{day}.json"), "clock skew warning missing-path mismatch")
+        _require(warning["reason"] == "clock_skew_daily file not found", "clock skew warning reason mismatch")
+
+        existing_output = temp_root / "existing-output"
+        existing_output.mkdir(parents=True, exist_ok=True)
+        existing_warn = existing_output / f"clock_skew_warning_{day}.json"
+        existing_warn.write_text('{"preserved": true}\n', encoding="utf-8")
+        existing_run = _run_python(
+            [script_rel, "--base-dir", str(missing_base), "--output-dir", str(existing_output), "--date", day],
+            cwd=ROOT,
+        )
+        _require(existing_run.returncode == 0, f"clock skew existing-warning run failed: {existing_run.stderr.strip()}")
+        _require(existing_warn.read_text(encoding="utf-8") == '{"preserved": true}\n', "clock skew existing warning should remain unchanged")
+
+    return 3
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -353,6 +404,7 @@ def main() -> int:
     fixture_count = _validate_example_fixtures()
     jsonl_repair_checks = _validate_jsonl_repair_utility()
     slice_freeze_checks = _validate_slice_freeze_utility()
+    clock_skew_checks = _validate_clock_skew_utility()
 
     print(
         "validated_public_shell="
@@ -361,6 +413,7 @@ def main() -> int:
         f"schema_examples:{fixture_count} "
         f"jsonl_repair_checks:{jsonl_repair_checks} "
         f"slice_freeze_checks:{slice_freeze_checks} "
+        f"clock_skew_checks:{clock_skew_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )
