@@ -30,6 +30,7 @@ EXPECTED_REPO_FILES = {
     "schemas/eval_manifest_v1.schema.json",
     "schemas/narrative_v0.schema.json",
     "scripts/clock_skew_check.py",
+    "scripts/data_inventory.py",
     "scripts/repair_jsonl_escaped_newlines_v1.py",
     "scripts/retention_watermark.py",
     "scripts/slice_freeze.py",
@@ -483,6 +484,115 @@ def _validate_retention_watermark_utility() -> int:
     return 3
 
 
+def _validate_data_inventory_utility() -> int:
+    script_rel = "scripts/data_inventory.py"
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-data-inventory-") as temp_dir:
+        temp_root = Path(temp_dir)
+        day_dir = temp_root / "2026-01-10"
+        day_dir.mkdir(parents=True, exist_ok=True)
+
+        (day_dir / "tick_observation.jsonl").write_text(
+            "\n".join(
+                [
+                    '{"ts_utc":"2026-01-10T00:05:00Z","symbol":"BTCUSDT","price":42000.5}',
+                    '{"ts_utc":"2026-01-10T03:15:00Z","symbol":"BTCUSDT","price":42110.0}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (day_dir / "orderbook_observation.jsonl").write_text(
+            '{"ts_utc":"2026-01-10T00:06:00Z","symbol":"BTCUSDT","bid":42000.0,"ask":42001.0}\n',
+            encoding="utf-8",
+        )
+        (temp_root / "event_spine.jsonl").write_text(
+            '{"timestamp":"2026-01-10T00:10:00Z","event_type":"market.regime","payload":{"symbol":"BTCUSDT","regime":"LOW"}}\n',
+            encoding="utf-8",
+        )
+
+        success_run = _run_python(
+            [
+                script_rel,
+                "--start",
+                "2026-01-10T00:00:00Z",
+                "--end",
+                "2026-01-10T06:00:00Z",
+                "--data-root",
+                str(temp_root),
+            ],
+            cwd=ROOT,
+        )
+        _require(success_run.returncode == 0, f"data inventory success run failed: {success_run.stderr.strip()}")
+        success_payload = json.loads(success_run.stdout)
+        _require_keys(success_payload, ["window", "layers"], "data inventory success payload")
+        _require(success_payload["window"]["start_utc"] == "2026-01-10T00:00:00+00:00", "data inventory start_utc mismatch")
+        _require(success_payload["window"]["end_utc"] == "2026-01-10T06:00:00+00:00", "data inventory end_utc mismatch")
+        for layer in ("ticks", "perception", "orderbook"):
+            layer_payload = success_payload["layers"][layer]
+            _require(layer_payload["available"] is True, f"data inventory layer {layer} should be available")
+            _require(layer_payload["coverage_pct"] == 100.0, f"data inventory layer {layer} coverage mismatch")
+        _require(success_payload["layers"]["ticks"]["first"] == "2026-01-10T00:05:00+00:00", "data inventory ticks first mismatch")
+        _require(success_payload["layers"]["ticks"]["last"] == "2026-01-10T03:15:00+00:00", "data inventory ticks last mismatch")
+
+        output_path = temp_root / "inventory.json"
+        output_run = _run_python(
+            [
+                script_rel,
+                "--start",
+                "2026-01-10T00:00:00Z",
+                "--end",
+                "2026-01-10T06:00:00Z",
+                "--data-root",
+                str(temp_root),
+                "--layers",
+                "ticks,unknown",
+                "--output",
+                str(output_path),
+            ],
+            cwd=ROOT,
+        )
+        _require(output_run.returncode == 0, f"data inventory output run failed: {output_run.stderr.strip()}")
+        _require("Warning: no data for layer unknown" in output_run.stderr, "data inventory unknown-layer warning mismatch")
+        output_payload = json.loads(output_path.read_text(encoding="utf-8"))
+        _require(output_payload["layers"]["unknown"]["available"] is False, "data inventory unknown layer availability mismatch")
+        _require(output_payload["layers"]["unknown"]["note"] == "unknown layer", "data inventory unknown layer note mismatch")
+
+        missing_root = temp_root / "missing"
+        missing_root.mkdir(parents=True, exist_ok=True)
+        missing_run = _run_python(
+            [
+                script_rel,
+                "--start",
+                "2026-01-10T00:00:00Z",
+                "--end",
+                "2026-01-10T06:00:00Z",
+                "--data-root",
+                str(missing_root),
+            ],
+            cwd=ROOT,
+        )
+        _require(missing_run.returncode == 2, f"data inventory missing-data returncode mismatch: {missing_run.returncode}")
+        _require("No data available for layers: ticks, perception, orderbook" in missing_run.stderr, "data inventory missing-data message mismatch")
+
+        invalid_time = _run_python(
+            [
+                script_rel,
+                "--start",
+                "bad-time",
+                "--end",
+                "2026-01-10T06:00:00Z",
+                "--data-root",
+                str(temp_root),
+            ],
+            cwd=ROOT,
+        )
+        _require(invalid_time.returncode == 1, f"data inventory invalid-time returncode mismatch: {invalid_time.returncode}")
+        _require("Error parsing timestamps" in invalid_time.stderr, "data inventory invalid-time error mismatch")
+
+    return 4
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -541,6 +651,7 @@ def main() -> int:
     slice_freeze_checks = _validate_slice_freeze_utility()
     clock_skew_checks = _validate_clock_skew_utility()
     retention_watermark_checks = _validate_retention_watermark_utility()
+    data_inventory_checks = _validate_data_inventory_utility()
 
     print(
         "validated_public_shell="
@@ -551,6 +662,7 @@ def main() -> int:
         f"slice_freeze_checks:{slice_freeze_checks} "
         f"clock_skew_checks:{clock_skew_checks} "
         f"retention_watermark_checks:{retention_watermark_checks} "
+        f"data_inventory_checks:{data_inventory_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )
