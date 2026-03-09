@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ EXPECTED_REPO_FILES = {
     "scripts/repair_jsonl_escaped_newlines_v1.py",
     "scripts/retention_watermark.py",
     "scripts/slice_freeze.py",
+    "scripts/spine_archive_rotations_v1.py",
     "scripts/validate_public_shell.py",
 }
 EXPORTED_PUBLIC_FILES = {
@@ -593,6 +595,133 @@ def _validate_data_inventory_utility() -> int:
     return 4
 
 
+def _validate_spine_archive_rotations_utility() -> int:
+    script_rel = "scripts/spine_archive_rotations_v1.py"
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-spine-archive-") as temp_dir:
+        temp_root = Path(temp_dir)
+
+        run_dir = temp_root / "runs" / "0.2.0"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        spine_path = run_dir / "event_spine.jsonl"
+        spine_path.write_text('{"timestamp":"2026-01-10T09:00:00Z","event_id":"live"}\n', encoding="utf-8")
+
+        rotated_plain = run_dir / "event_spine.jsonl.1"
+        rotated_plain.write_text(
+            "\n".join(
+                [
+                    '{"event_id":"a","timestamp":"2026-01-10T00:00:00Z"}',
+                    '{"event_id":"b","timestamp":"2026-01-10T00:01:00Z"}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rotated_gz = run_dir / "event_spine.jsonl.2.gz"
+        with gzip.open(rotated_gz, "wt", encoding="utf-8") as handle:
+            handle.write('{"event_id":"c","timestamp":"2026-01-10T00:02:00Z"}\n')
+
+        manifest_path = temp_root / "archive_manifest_v1.jsonl"
+        checkpoint_path = temp_root / "archive_checkpoint.json"
+        archive_dir = temp_root / "archive"
+
+        first_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(spine_path),
+                "--manifest-jsonl",
+                str(manifest_path),
+                "--checkpoint-json",
+                str(checkpoint_path),
+                "--archive-dir",
+                str(archive_dir),
+            ],
+            cwd=ROOT,
+        )
+        _require(first_run.returncode == 0, f"spine archive first run failed: {first_run.stderr.strip()}")
+        first_payload = json.loads(first_run.stdout)
+        _require(first_payload["schema_version"] == "spine_archive_rotations_v1", "spine archive schema_version mismatch")
+        _require(first_payload["candidates_total"] == 2, "spine archive candidates_total mismatch")
+        _require(first_payload["processed_new"] == 2, "spine archive processed_new mismatch")
+        _require(first_payload["moved_new"] == 0, "spine archive moved_new mismatch")
+        _require(first_payload["skipped_known"] == 0, "spine archive skipped_known mismatch")
+        _require(manifest_path.is_file(), "spine archive did not create manifest")
+        _require(checkpoint_path.is_file(), "spine archive did not create checkpoint")
+
+        manifest_records = [
+            json.loads(line)
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        _require(len(manifest_records) == 2, "spine archive manifest record count mismatch")
+        by_source = {Path(item["source_path"]).name: item for item in manifest_records}
+        _require("event_spine.jsonl.1" in by_source, "spine archive missing plain rotation record")
+        _require("event_spine.jsonl.2.gz" in by_source, "spine archive missing gz rotation record")
+        _require(by_source["event_spine.jsonl.1"]["min_ts_utc"] == "2026-01-10T00:00:00Z", "spine archive plain min_ts mismatch")
+        _require(by_source["event_spine.jsonl.1"]["max_ts_utc"] == "2026-01-10T00:01:00Z", "spine archive plain max_ts mismatch")
+        _require(by_source["event_spine.jsonl.2.gz"]["min_ts_utc"] == "2026-01-10T00:02:00Z", "spine archive gz min_ts mismatch")
+        _require(by_source["event_spine.jsonl.2.gz"]["line_count"] == 1, "spine archive gz line_count mismatch")
+
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        _require(checkpoint["schema_version"] == "spine_archive_rotations_v1", "spine archive checkpoint schema_version mismatch")
+        _require(len(checkpoint["processed_sha256"]) == 2, "spine archive checkpoint processed count mismatch")
+
+        second_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(spine_path),
+                "--manifest-jsonl",
+                str(manifest_path),
+                "--checkpoint-json",
+                str(checkpoint_path),
+                "--archive-dir",
+                str(archive_dir),
+            ],
+            cwd=ROOT,
+        )
+        _require(second_run.returncode == 0, f"spine archive second run failed: {second_run.stderr.strip()}")
+        second_payload = json.loads(second_run.stdout)
+        _require(second_payload["processed_new"] == 0, "spine archive second run processed_new mismatch")
+        _require(second_payload["skipped_known"] == 2, "spine archive second run skipped_known mismatch")
+
+        move_root = temp_root / "move"
+        move_root.mkdir(parents=True, exist_ok=True)
+        move_spine = move_root / "event_spine.jsonl"
+        move_spine.write_text("", encoding="utf-8")
+        move_rotated = move_root / "event_spine.jsonl.1"
+        move_rotated.write_text('{"event_id":"m","timestamp":"2026-01-10T01:00:00Z"}\n', encoding="utf-8")
+        move_manifest = temp_root / "move_manifest.jsonl"
+        move_checkpoint = temp_root / "move_checkpoint.json"
+        move_archive_dir = temp_root / "move_archive"
+
+        move_run = _run_python(
+            [
+                script_rel,
+                "--spine-path",
+                str(move_spine),
+                "--manifest-jsonl",
+                str(move_manifest),
+                "--checkpoint-json",
+                str(move_checkpoint),
+                "--archive-dir",
+                str(move_archive_dir),
+                "--move",
+            ],
+            cwd=ROOT,
+        )
+        _require(move_run.returncode == 0, f"spine archive move run failed: {move_run.stderr.strip()}")
+        move_payload = json.loads(move_run.stdout)
+        _require(move_payload["processed_new"] == 1, "spine archive move processed_new mismatch")
+        _require(move_payload["moved_new"] == 1, "spine archive move moved_new mismatch")
+        moved_path = move_archive_dir / "event_spine.jsonl.1"
+        _require(moved_path.is_file(), "spine archive move did not move rotated file")
+        _require(not move_rotated.exists(), "spine archive move left source file in place")
+
+    return 4
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -652,6 +781,7 @@ def main() -> int:
     clock_skew_checks = _validate_clock_skew_utility()
     retention_watermark_checks = _validate_retention_watermark_utility()
     data_inventory_checks = _validate_data_inventory_utility()
+    spine_archive_rotation_checks = _validate_spine_archive_rotations_utility()
 
     print(
         "validated_public_shell="
@@ -663,6 +793,7 @@ def main() -> int:
         f"clock_skew_checks:{clock_skew_checks} "
         f"retention_watermark_checks:{retention_watermark_checks} "
         f"data_inventory_checks:{data_inventory_checks} "
+        f"spine_archive_rotation_checks:{spine_archive_rotation_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )
