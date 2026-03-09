@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from collections import Counter
 from pathlib import Path
+import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,12 +16,16 @@ EXPECTED_REPO_FILES = {
     "docs/public_shell_export_v1.md",
     "export_audit_report.json",
     "export_audit_report.md",
+    "fixtures/jsonl_repair/escaped_newlines_expected.jsonl",
+    "fixtures/jsonl_repair/escaped_newlines_input.jsonl",
+    "fixtures/jsonl_repair/escaped_newlines_invalid.jsonl",
     "fixtures/schema_examples/courts_index_v1.example.json",
     "fixtures/schema_examples/eval_manifest_v1.example.json",
     "fixtures/schema_examples/narrative_v0.example.json",
     "schemas/courts_index_v1.schema.json",
     "schemas/eval_manifest_v1.schema.json",
     "schemas/narrative_v0.schema.json",
+    "scripts/repair_jsonl_escaped_newlines_v1.py",
     "scripts/validate_public_shell.py",
 }
 EXPORTED_PUBLIC_FILES = {
@@ -72,6 +80,16 @@ def _require_keys(payload: dict, keys: list[str], label: str) -> None:
 
 def _is_hex_64(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= HEX_64
+
+
+def _run_python(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _validate_example_fixtures() -> int:
@@ -160,6 +178,45 @@ def _validate_example_fixtures() -> int:
     return 3
 
 
+def _validate_jsonl_repair_utility() -> int:
+    fixture_root = ROOT / "fixtures" / "jsonl_repair"
+    script_rel = "scripts/repair_jsonl_escaped_newlines_v1.py"
+    expected = (fixture_root / "escaped_newlines_expected.jsonl").read_text(encoding="utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="public-shell-jsonl-repair-") as temp_dir:
+        temp_root = Path(temp_dir)
+
+        valid_input = temp_root / "valid.jsonl"
+        shutil.copy2(fixture_root / "escaped_newlines_input.jsonl", valid_input)
+
+        dry_run = _run_python([script_rel, "--path", str(valid_input)], cwd=ROOT)
+        _require(dry_run.returncode == 0, f"jsonl repair dry-run failed: {dry_run.stderr.strip()}")
+        dry_payload = json.loads(dry_run.stdout)
+        _require(dry_payload["status"] == "dry_run_ok", "jsonl repair dry-run status mismatch")
+        _require(dry_payload["stats"]["escaped_split_lines"] == 1, "jsonl repair dry-run escaped_split_lines mismatch")
+        _require(dry_payload["stats"]["written_rows"] == 3, "jsonl repair dry-run written_rows mismatch")
+        _require(dry_payload["stats"]["invalid_fragments"] == 0, "jsonl repair dry-run invalid_fragments mismatch")
+        _require(valid_input.read_text(encoding="utf-8") == (fixture_root / "escaped_newlines_input.jsonl").read_text(encoding="utf-8"), "jsonl repair dry-run mutated input")
+
+        apply_run = _run_python([script_rel, "--path", str(valid_input), "--apply"], cwd=ROOT)
+        _require(apply_run.returncode == 0, f"jsonl repair apply failed: {apply_run.stderr.strip()}")
+        apply_payload = json.loads(apply_run.stdout)
+        _require(apply_payload["status"] == "applied", "jsonl repair apply status mismatch")
+        backup_path = Path(apply_payload["backup_path"])
+        _require(backup_path.is_file(), "jsonl repair apply did not create backup")
+        _require(valid_input.read_text(encoding="utf-8") == expected, "jsonl repair apply output mismatch")
+
+        invalid_input = temp_root / "invalid.jsonl"
+        shutil.copy2(fixture_root / "escaped_newlines_invalid.jsonl", invalid_input)
+        invalid_run = _run_python([script_rel, "--path", str(invalid_input)], cwd=ROOT)
+        _require(invalid_run.returncode == 2, f"jsonl repair invalid dry-run returncode mismatch: {invalid_run.returncode}")
+        invalid_payload = json.loads(invalid_run.stdout)
+        _require(invalid_payload["status"] == "blocked_invalid_fragments", "jsonl repair invalid status mismatch")
+        _require(invalid_payload["stats"]["invalid_fragments"] >= 1, "jsonl repair invalid count mismatch")
+
+    return 3
+
+
 def main() -> int:
     repo_files = _repo_files(ROOT)
     _require(repo_files == EXPECTED_REPO_FILES, f"unexpected repo file set: {sorted(repo_files)}")
@@ -214,12 +271,14 @@ def main() -> int:
     _require("# Public Shell Export Audit" in audit_md, f"{audit_md_path} is missing expected title")
 
     fixture_count = _validate_example_fixtures()
+    jsonl_repair_checks = _validate_jsonl_repair_utility()
 
     print(
         "validated_public_shell="
         f"repo_files:{len(repo_files)} "
         f"schemas:{len(schema_payloads)} "
         f"schema_examples:{fixture_count} "
+        f"jsonl_repair_checks:{jsonl_repair_checks} "
         f"audit_exported:{len(audit_exported)} "
         f"scanned_files:{audit['scanned_files']}"
     )
