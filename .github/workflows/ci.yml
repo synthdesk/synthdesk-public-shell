@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-public-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: python --version
+
+      - name: Validate exported public shell surface
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          required_files = [
+              Path("docs/public_shell_export_v1.md"),
+              Path("schemas/courts_index_v1.schema.json"),
+              Path("schemas/eval_manifest_v1.schema.json"),
+              Path("schemas/narrative_v0.schema.json"),
+              Path("export_audit_report.json"),
+              Path("export_audit_report.md"),
+          ]
+
+          missing = [str(path) for path in required_files if not path.is_file()]
+          if missing:
+              raise SystemExit(f"missing required public shell files: {missing}")
+
+          for path in required_files[1:4]:
+              payload = json.loads(path.read_text(encoding="utf-8"))
+              if not isinstance(payload, dict):
+                  raise SystemExit(f"{path} did not parse as a JSON object")
+
+          print("validated_files=" + ",".join(str(path) for path in required_files))
+          PY

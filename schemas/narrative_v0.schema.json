@@ -1,0 +1,317 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "export": "public",
+  "$id": "narrative_v0",
+  "title": "RV Regime Narrative (v0)",
+  "description": "Frozen output schema for rv_regime_narrative_v0.py. Downstream consumers may code against this contract. Breaking changes require a new version (narrative_v1).",
+  "frozen_at": "2026-02-10",
+  "type": "object",
+  "required": [
+    "generated_utc",
+    "model_calibration_start",
+    "model_calibration_end",
+    "bocpd_run_id",
+    "bocpd_window",
+    "data_lag_hours",
+    "assets"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "generated_utc": {
+      "type": "string",
+      "description": "ISO8601 UTC timestamp of report generation"
+    },
+    "model_calibration_start": {
+      "type": ["string", "null"],
+      "description": "Start date of HMM calibration window (YYYY-MM-DD)"
+    },
+    "model_calibration_end": {
+      "type": ["string", "null"],
+      "description": "End date of HMM calibration window (YYYY-MM-DD)"
+    },
+    "bocpd_run_id": {
+      "type": "string",
+      "description": "BOCPD run identifier"
+    },
+    "bocpd_window": {
+      "type": "string",
+      "description": "BOCPD observation window as 'YYYY-MM-DD -> YYYY-MM-DD'"
+    },
+    "data_lag_hours": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Hours between last BOCPD observation and report generation. Null if unparseable."
+    },
+    "assets": {
+      "type": "object",
+      "description": "Per-asset narrative keyed by symbol (e.g. BTCUSDT)",
+      "additionalProperties": {
+        "$ref": "#/definitions/asset_narrative"
+      }
+    }
+  },
+  "definitions": {
+    "asset_narrative": {
+      "type": "object",
+      "required": [
+        "current_regime",
+        "dwell",
+        "residual_health",
+        "bocpd_status",
+        "expected_exits"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "current_regime": { "$ref": "#/definitions/current_regime" },
+        "dwell": { "$ref": "#/definitions/dwell" },
+        "residual_health": { "$ref": "#/definitions/residual_health" },
+        "bocpd_status": { "$ref": "#/definitions/bocpd_status" },
+        "expected_exits": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/exit_entry" },
+          "description": "Exit destinations ranked by probability descending. May be empty if absorbing state."
+        }
+      }
+    },
+    "current_regime": {
+      "type": "object",
+      "required": [
+        "state",
+        "state_idx",
+        "confidence",
+        "confidence_window_avg",
+        "log_rv",
+        "vol_of_vol",
+        "emission_mean",
+        "emission_distance_sigma",
+        "window_obs",
+        "last_ts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["LOW", "MID", "HIGH"],
+          "description": "MAP state label at last observation. Closed enum."
+        },
+        "state_idx": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "State index in HMM model (0=LOW, 1=MID, 2=HIGH for 3-state)"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Filtered state probability at last observation: P(z_T = state | x_{1:T})"
+        },
+        "confidence_window_avg": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Mean filtered probability of current state over trailing window"
+        },
+        "log_rv": {
+          "type": "number",
+          "description": "Log realized volatility at last observation (log scale, unitless)"
+        },
+        "vol_of_vol": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Vol-of-vol at last observation (rolling std of log-RV)"
+        },
+        "emission_mean": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "[log_rv_mean, vov_mean] emission mean of current state from model"
+        },
+        "emission_distance_sigma": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "Distance from emission mean in marginal sigma: (x - mu) / sqrt(cov[d,d])"
+        },
+        "window_obs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of observations in trailing assessment window"
+        },
+        "last_ts": {
+          "type": "string",
+          "description": "ISO8601 timestamp of last observation in BOCPD timeseries"
+        }
+      }
+    },
+    "dwell": {
+      "type": "object",
+      "required": [
+        "current_dwell_obs",
+        "expected_dwell_obs",
+        "dwell_percentile",
+        "interpretation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "current_dwell_obs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Consecutive observations in current MAP state (walking backward from end)"
+        },
+        "expected_dwell_obs": {
+          "type": ["number", "null"],
+          "description": "Expected dwell: 1/(1-P_self) observations. Null if P_self ~ 1 (absorbing)."
+        },
+        "dwell_percentile": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Geometric CDF at current dwell: 1 - P_self^n"
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": ["early", "normal", "extended"],
+          "description": "Dwell normality. early: <10th pct, normal: 10-90th pct, extended: >90th pct."
+        }
+      }
+    },
+    "residual_health": {
+      "type": "object",
+      "required": [
+        "mean_d2",
+        "chi2_ref_mean",
+        "d2_ratio",
+        "tail_5pct",
+        "expected_5pct",
+        "tail_inflation",
+        "interpretation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mean_d2": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Mean mixture Mahalanobis d-squared over BOCPD window"
+        },
+        "chi2_ref_mean": {
+          "type": "number",
+          "description": "Chi-squared(2) reference mean. Always 2.0."
+        },
+        "d2_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "description": "mean_d2 / chi2_ref_mean. Ratio of 1.0 = perfect calibration."
+        },
+        "tail_5pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Empirical fraction of d-squared exceeding chi2(2) 95th percentile (5.991)"
+        },
+        "expected_5pct": {
+          "type": "number",
+          "description": "Expected tail rate under chi2(2). Always 0.05."
+        },
+        "tail_inflation": {
+          "type": "number",
+          "minimum": 0,
+          "description": "tail_5pct / expected_5pct. Inflation factor; 1.0 = expected."
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": ["well-fit", "stressed", "under-predicting"],
+          "description": "Model fit bucket. well-fit: d2_ratio<1.5, stressed: 1.5-2.5, under-predicting: >=2.5."
+        }
+      }
+    },
+    "bocpd_status": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "n_cp_episodes",
+        "max_mass_short",
+        "last_reset_ts",
+        "interpretation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": ["FRESH", "BORDERLINE", "STALE", "UNKNOWN"],
+          "description": "BOCPD freshness verdict from summary.json"
+        },
+        "n_cp_episodes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of changepoint episodes detected in BOCPD window"
+        },
+        "max_mass_short": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Maximum posterior mass on short run lengths over window"
+        },
+        "last_reset_ts": {
+          "type": ["string", "null"],
+          "description": "ISO8601 timestamp of last BOCPD episode open event. Null if no episodes."
+        },
+        "interpretation": {
+          "type": "string",
+          "enum": ["none", "stress", "break", "unknown"],
+          "description": "Model health. none=FRESH, stress=BORDERLINE, break=STALE."
+        }
+      }
+    },
+    "exit_entry": {
+      "type": "object",
+      "required": [
+        "to_state",
+        "to_label",
+        "to_state_idx",
+        "probability",
+        "delta_log_rv",
+        "delta_vov",
+        "signature"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "to_state": {
+          "type": "string",
+          "enum": ["LOW", "MID", "HIGH"],
+          "description": "Destination state label"
+        },
+        "to_label": {
+          "type": "string",
+          "description": "Destination with semantic annotation: 'LOW (chaotic)'"
+        },
+        "to_state_idx": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Destination state index"
+        },
+        "probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Exit probability: transmat[k,j] / (1 - transmat[k,k])"
+        },
+        "delta_log_rv": {
+          "type": "number",
+          "description": "Emission mean delta in log-RV: destination - current"
+        },
+        "delta_vov": {
+          "type": "number",
+          "description": "Emission mean delta in vol-of-vol: destination - current"
+        },
+        "signature": {
+          "type": "string",
+          "description": "Human-readable directional summary (e.g. 'vol drops, instability rises')"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "export": "public",
+  "$id": "eval_manifest_v1",
+  "title": "Court Evaluation Manifest (v1)",
+  "description": "Atomic immutable evaluation tuple and frozen inputs for court-grade adjudication runs.",
+  "type": "object",
+  "required": [
+    "version",
+    "court",
+    "hypothesis_id",
+    "window",
+    "eval_tuple",
+    "eval_id",
+    "inputs"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "court": {
+      "type": "string"
+    },
+    "hypothesis_id": {
+      "type": "string"
+    },
+    "window": {
+      "type": "string"
+    },
+    "window_bounds": {
+      "type": "object",
+      "description": "Optional deterministic evaluation window bounds. Prefer using these for time-series monitoring.",
+      "required": [
+        "start_ts_utc",
+        "end_ts_utc"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "start_ts_utc": {
+          "type": "string"
+        },
+        "end_ts_utc": {
+          "type": "string"
+        }
+      }
+    },
+    "eval_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "eval_tuple": {
+      "type": "object",
+      "required": [
+        "spine_hash",
+        "feature_version",
+        "regime_model_version",
+        "horizon_spec"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "spine_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "feature_version": {
+          "type": "string"
+        },
+        "regime_model_version": {
+          "type": "string"
+        },
+        "horizon_spec": {
+          "type": "object",
+          "required": [
+            "horizon_minutes"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "horizon_minutes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "embargo_seconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "required": [
+        "spine_snapshot",
+        "spine_sha256",
+        "spine_bytes",
+        "tick_hashes"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "spine_snapshot": {
+          "type": "string"
+        },
+        "spine_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spine_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tick_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
